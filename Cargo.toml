@@ -14,6 +14,8 @@ xxhash-rust = { version = "0.8.19", features = ["xxh3"] }
 git2 = "0.21.0"
 crossterm = "0.29.0"
 anyhow = "1.0.104"
+terminal_size = "0.4.4"
+millisecond = "0.15.14"
 
 [dependencies.uuid]
 version = "1.26.1"

@@ -15,11 +15,13 @@ dependencies = [
  "anyhow",
  "crossterm",
  "git2",
+ "millisecond",
  "rand",
  "serde",
  "serde_derive",
  "serde_json",
  "serde_millis",
+ "terminal_size",
  "time",
  "uuid",
  "xxhash-rust",
@@ -301,6 +303,12 @@ name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
+
+[[package]]
+name = "millisecond"
+version = "0.15.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "50ec92f9830414b57204661472c966f7b7717769741b74d18226d398bfe6ab78"
 
 [[package]]
 name = "mio"
@@ -587,6 +595,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "terminal_size"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
+dependencies = [
+ "rustix",
+ "windows-sys",
 ]
 
 [[package]]
