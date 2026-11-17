@@ -1,0 +1,16 @@
+Destination Exists:
+- Backup data might not exist or might have been modified
+
+Check also
+- Correctness under normal conditions
+- Test symlinks aren't copied properly
+- If sufficiently long time in the past, a modification to the destination is noticed and overwritten
+- Check that file count is accurate
+- Regular File becomes folder and vice versa
+
+Benchmark
+
+
+Future
+- Maybe I should check timezone stuff?
+- There are all kinds of permission things
