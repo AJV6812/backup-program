@@ -2,8 +2,8 @@ use std::{
     fmt::Display,
     fs::File,
     io::{self, StdoutLock, Write},
-    sync::mpsc,
-    time::{Duration, SystemTime},
+    sync::mpsc::{self},
+    time::{Duration, Instant, SystemTime},
 };
 
 use crossterm::{
@@ -29,7 +29,7 @@ pub enum StatusUpdate {
     FolderScanned(),
     FolderFailed(String),
     FolderDeleted(String, i32, i32),
-    ScanFinished(),
+    ScanFinished(i32),
 }
 impl StatusUpdate {
     fn should_format(&self) -> bool {
@@ -43,7 +43,7 @@ impl StatusUpdate {
             StatusUpdate::FileUnchanged() => false,
             StatusUpdate::FolderScanned() => false,
             StatusUpdate::FolderDiscovered(_, _) => false,
-            StatusUpdate::ScanFinished() => false,
+            StatusUpdate::ScanFinished(_) => true,
         }
     }
 }
@@ -59,7 +59,7 @@ impl Display for StatusUpdate {
             StatusUpdate::FileUnchanged() => Err(std::fmt::Error),
             StatusUpdate::FolderScanned() => Err(std::fmt::Error),
             StatusUpdate::FolderDiscovered(_, _) => Err(std::fmt::Error),
-            StatusUpdate::ScanFinished() => Err(std::fmt::Error),
+            StatusUpdate::ScanFinished(num) => write!(f, "TOTAL FILES: {num}"),
         }
     }
 }
@@ -68,6 +68,7 @@ struct StatusBar<'a> {
     start_time: SystemTime,
     width: u16,
     duration_options: MillisecondOption<'a>,
+    scan_in_progress: bool,
 }
 impl StatusBar<'_> {
     fn get_width() -> u16 {
@@ -91,24 +92,29 @@ impl StatusBar<'_> {
                 separator: millisecond::pretty::Separator::Default,
                 seconds: Separate,
             },
+            scan_in_progress: true,
         }
     }
     fn update_status_bars(
         &mut self,
-        event: StatusUpdate,
+        event_pos: Option<StatusUpdate>,
         prog1: i32,
         tot1: i32,
         prog2: i32,
         tot2: i32,
-        scan_in_progress: bool,
     ) {
-        if event.should_format() {
+        if let Some(event) = event_pos {
             execute!(self.handle, Clear(ClearType::FromCursorDown)).expect("Please use terminal!");
-            println!("{}", event);
+            if event.should_format() {
+                println!("{}", event);
+            }
+            if let StatusUpdate::ScanFinished(_) = event {
+                self.scan_in_progress = false;
+            }
         }
         self.width = Self::get_width();
 
-        let mut printed = if scan_in_progress {
+        let mut printed = if self.scan_in_progress {
             self.printstatus("SCAN", prog1, tot1) as u16
         } else {
             0
@@ -167,8 +173,6 @@ impl StatusBar<'_> {
     }
 }
 
-//TODO: Check that stdout is reserved for logging
-
 pub fn update_status(
     backup_data: &BackupData,
     status_rx: mpsc::Receiver<StatusUpdate>,
@@ -186,9 +190,33 @@ pub fn update_status(
     let mut scanned_folders = 0;
     let mut expected_total_folders: i32 = backup_data.folders as i32;
 
-    let mut scan_in_progress = true;
-    for recv in status_rx {
-        //TODO: Throttle this function
+    let status_dur = Duration::new(1, 0);
+    let min_log_duration = Duration::new(0, 200000000);
+    let mut last_log = Instant::now() - Duration::new(1, 0);
+
+    loop {
+        let recv = match status_rx.recv_timeout(status_dur) {
+            Ok(obj) => obj,
+            Err(e) => {
+                if logging {
+                    status_bars.update_status_bars(
+                        Option::None,
+                        scanned_folders,
+                        expected_total_folders,
+                        copied_files,
+                        expected_total_files,
+                    );
+                }
+                match e {
+                    mpsc::RecvTimeoutError::Disconnected => {
+                        break;
+                    }
+                    mpsc::RecvTimeoutError::Timeout => {
+                        continue;
+                    }
+                }
+            }
+        };
         match recv.clone() {
             StatusUpdate::FileAdded(str) => {
                 added_files.push(str);
@@ -222,10 +250,8 @@ pub fn update_status(
             StatusUpdate::FolderScanned() => {
                 scanned_folders += 1;
             }
-            StatusUpdate::ScanFinished() => {
-                println!("");
-                assert!(scan_in_progress);
-                scan_in_progress = false;
+            StatusUpdate::ScanFinished(num_files) => {
+                expected_total_files = num_files;
             }
         }
 
@@ -236,15 +262,16 @@ pub fn update_status(
             expected_total_folders = scanned_folders;
         }
 
-        if logging {
+        let time_since_last_log = Instant::now().duration_since(last_log);
+        if logging && time_since_last_log >= min_log_duration {
             status_bars.update_status_bars(
-                recv,
+                Some(recv),
                 scanned_folders,
                 expected_total_folders,
                 copied_files,
                 expected_total_files,
-                scan_in_progress,
             );
+            last_log = Instant::now();
         }
     }
 
@@ -274,8 +301,7 @@ pub fn update_status(
     //let Result::Ok(path_log) = File::create_new(&destination_path_log) else {
     //    panic!("Cannot create a log file in destination!");
     //};
-    make_read_only(&destination_path_log)
-        .expect("Should be able to change permissions in destination log!");
+    let _ = make_read_only(&destination_path_log);
 
     write_result(&backup_result, path_log).expect("Should be able to write to path location!");
 

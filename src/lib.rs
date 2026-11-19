@@ -3,6 +3,8 @@
 mod config;
 mod status;
 
+//TODO: Use more copying threads as well
+
 use anyhow::bail;
 use config::{AVERAGE_DAYS_TO_HASH_EVERYTHING, REPO_FLAGS, ignore, protect};
 use git2::Repository;
@@ -12,7 +14,7 @@ use status::StatusUpdate;
 use std::error::Error;
 use std::fs;
 use std::fs::{File, read_to_string};
-use std::io::{self, Read, Write};
+use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
@@ -24,6 +26,19 @@ use uuid::Uuid;
 use xxhash_rust::xxh3::xxh3_64;
 
 use crate::status::update_status;
+
+macro_rules! debug_dbg {
+    ($($arg:tt)*) => {{
+        #[cfg(debug_assertions)]
+        {
+            std::dbg!($($arg)*)
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            $($arg)*
+        }
+    }};
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 struct SerializableBackupData {
@@ -85,8 +100,7 @@ fn initialise_backup(origin: &str, destination: &str) {
         .write_all(uuids.as_bytes())
         .expect("Should be able to write to origin secret file!");
     drop(origin_secrets);
-    make_read_only(&uuid_path)
-        .expect("Should be able to modify permissions on origin secret file!");
+    let _ = make_read_only(&uuid_path);
 
     let serialise_backup_data = SerializableBackupData {
         origin: String::from(origin),
@@ -126,14 +140,14 @@ fn get_uuids(origin_path: &Path) -> Vec<Uuid> {
 fn make_read_only(path: &PathBuf) -> Result<(), anyhow::Error> {
     let mut perms = fs::metadata(path)?.permissions();
     perms.set_readonly(true);
-    fs::set_permissions(path, perms).expect("Need permission to edit destination!");
+    fs::set_permissions(path, perms)?;
     Ok(())
 }
 
 fn allow_write(path: &PathBuf) -> Result<(), anyhow::Error> {
     let mut perms = fs::metadata(path)?.permissions();
     perms.set_readonly(false);
-    fs::set_permissions(path, perms).expect("Need permission to edit destination!");
+    fs::set_permissions(path, perms)?;
     Ok(())
 }
 
@@ -147,24 +161,28 @@ fn copy_file(
     let destination_path = backup_data.destination.join(relative_path);
 
     if already_existed {
-        allow_write(&destination_path)?;
+        let _ = allow_write(&destination_path);
     }
-    fs::copy(origin_path, &destination_path)?;
-    make_read_only(&destination_path)?;
+    if fs::copy(&origin_path, &destination_path).is_err() {
+        let mut src = BufReader::new(File::open(&origin_path)?);
+        let mut dst = BufWriter::new(File::create(&destination_path)?);
+        io::copy(&mut src, &mut dst)?;
+    };
+    let _ = make_read_only(&destination_path);
 
     if already_existed {
         tx.send(StatusUpdate::FileModified(
             relative_path.clone().into_string().unwrap(),
         ))
         .unwrap_or_else(|e| {
-            dbg!(e);
+            debug_dbg!(e);
         });
     } else {
         tx.send(StatusUpdate::FileAdded(
             relative_path.clone().into_string().unwrap(),
         ))
         .unwrap_or_else(|e| {
-            dbg!(e);
+            debug_dbg!(e);
         });
     }
     Ok(())
@@ -211,10 +229,10 @@ fn check_file(
     if orig_file.modified()? >= dest_file.modified()?
         || orig_file.modified()? >= backup_data.last_backup
     {
-        //TODO: remove clones below
-        let hash_mismatch =
-            compute_hash(origin_path.clone())? != compute_hash(destination_path.clone())?;
-        return Ok((hash_mismatch, true));
+        return Ok((
+            compute_hash(origin_path)? != compute_hash(destination_path)?,
+            true,
+        ));
     }
 
     //TODO: Check random_check_probability works as intended
@@ -237,7 +255,7 @@ fn backup_folder(
     status_tx: &mpsc::Sender<StatusUpdate>,
     repo: &Option<Repository>,
     mut logging_open: bool,
-) -> bool {
+) -> (bool, i32) {
     let origin_path = backup_data.origin.join(&relative_path);
     let destination_path = backup_data.destination.join(&relative_path);
 
@@ -255,7 +273,7 @@ fn backup_folder(
     let entries = match fs::read_dir(&origin_path) {
         Ok(entries) => entries,
         Err(e) => {
-            dbg!(e);
+            debug_dbg!(e);
 
             if logging_open {
                 status_tx
@@ -263,11 +281,11 @@ fn backup_folder(
                         relative_path.into_string().unwrap(),
                     ))
                     .unwrap_or_else(|e| {
-                        dbg!(e);
+                        debug_dbg!(e);
                         logging_open = false;
                     });
             }
-            return logging_open;
+            return (logging_open, 0);
         }
     };
 
@@ -275,14 +293,14 @@ fn backup_folder(
         let entry = match entry {
             Ok(entry) => entry,
             Err(e) => {
-                dbg!(e);
+                debug_dbg!(e);
                 if logging_open {
                     status_tx
                         .send(StatusUpdate::FolderFailed(
                             relative_path.clone().into_string().unwrap(),
                         ))
                         .unwrap_or_else(|e| {
-                            dbg!(e);
+                            debug_dbg!(e);
                             logging_open = false;
                         });
                 }
@@ -297,14 +315,14 @@ fn backup_folder(
         let should_ignore = match ignore(&absolute_path, repo) {
             Ok(res) => res,
             Err(e) => {
-                dbg!(e);
+                debug_dbg!(e);
                 if logging_open {
                     status_tx
                         .send(StatusUpdate::FolderFailed(
                             entry_path.into_string().unwrap(),
                         ))
                         .unwrap_or_else(|e| {
-                            dbg!(e);
+                            debug_dbg!(e);
                             logging_open = false;
                         });
                 }
@@ -319,14 +337,14 @@ fn backup_folder(
         let file_type = match entry.file_type() {
             Ok(file_type) => file_type,
             Err(e) => {
-                dbg!(e);
+                debug_dbg!(e);
                 if logging_open {
                     status_tx
                         .send(StatusUpdate::FolderFailed(
                             entry_path.into_string().unwrap(),
                         ))
                         .unwrap_or_else(|e| {
-                            dbg!(e);
+                            debug_dbg!(e);
                             logging_open = false;
                         });
                 }
@@ -371,11 +389,13 @@ fn backup_folder(
     let delta_folders = folders_to_copy.len() as i32 - existing_folders;
     let delta_files = files_to_copy.len() as i32 - existing_files;
 
+    let mut total_files = files_to_copy.len() as i32;
+
     if logging_open {
         status_tx
             .send(StatusUpdate::FolderDiscovered(delta_folders, delta_files))
             .unwrap_or_else(|e| {
-                dbg!(e);
+                debug_dbg!(e);
                 logging_open = false;
             });
     }
@@ -387,7 +407,7 @@ fn backup_folder(
             status_tx
                 .send(StatusUpdate::FileDeleted(file.into_string().unwrap()))
                 .unwrap_or_else(|e| {
-                    dbg!(e);
+                    debug_dbg!(e);
                     logging_open = false;
                 });
         }
@@ -405,7 +425,7 @@ fn backup_folder(
                     files_inside,
                 ))
                 .unwrap_or_else(|e| {
-                    dbg!(e);
+                    debug_dbg!(e);
                     logging_open = false;
                 });
         }
@@ -415,14 +435,14 @@ fn backup_folder(
         status_tx
             .send(StatusUpdate::FolderScanned())
             .unwrap_or_else(|e| {
-                dbg!(e);
+                debug_dbg!(e);
                 logging_open = false;
             });
     }
     for file in files_to_copy {
         if logging_open {
             backup_tx.send(file).unwrap_or_else(|e| {
-                dbg!(e);
+                debug_dbg!(e);
                 logging_open = false;
             });
         }
@@ -430,29 +450,31 @@ fn backup_folder(
     for folder in folders_to_copy {
         match fs::create_dir_all(backup_data.destination.join(&folder)) {
             Err(e) => {
-                dbg!(e);
+                debug_dbg!(e);
                 if logging_open {
                     status_tx
                         .send(StatusUpdate::FolderFailed(folder.into_string().unwrap()))
                         .unwrap_or_else(|e| {
-                            dbg!(e);
+                            debug_dbg!(e);
                             logging_open = false;
                         });
                 }
             }
             Ok(()) => {
-                logging_open = backup_folder(
+                let new_files;
+                (logging_open, new_files) = backup_folder(
                     backup_data,
                     folder,
                     backup_tx,
                     status_tx,
                     repo,
                     logging_open,
-                )
+                );
+                total_files += new_files;
             }
         }
     }
-    logging_open
+    (logging_open, total_files)
 }
 
 fn compute_random_check_probability(last_backup: SystemTime, current_time: SystemTime) -> f32 {
@@ -528,8 +550,6 @@ pub fn attempt_update_backup(
         dump_secret: stored_data.dump_secret,
     };
 
-    //TODO Assert both are folders
-
     let secrets: Vec<Uuid> = get_uuids(&backup_data.origin);
     assert!(secrets.contains(&backup_data.dump_secret));
 
@@ -543,14 +563,15 @@ pub fn attempt_update_backup(
         for recv in backup_rx {
             let (must_be_copied, already_exists) =
                 check_file(&child_backup_data, &recv, random_check_probability).unwrap_or_else(
-                    |_| {
+                    |e| {
+                        debug_dbg!(e);
                         if logging_open {
                             child_status_tx
                                 .send(StatusUpdate::FileFailed(
                                     recv.clone().into_string().unwrap(),
                                 ))
                                 .unwrap_or_else(|e| {
-                                    dbg!(e);
+                                    debug_dbg!(e);
                                     logging_open = false;
                                 });
                         }
@@ -559,12 +580,13 @@ pub fn attempt_update_backup(
                 );
             if must_be_copied {
                 copy_file(&child_backup_data, &recv, &child_status_tx, already_exists)
-                    .unwrap_or_else(|_| {
+                    .unwrap_or_else(|e| {
+                        debug_dbg!(e);
                         if logging_open {
                             child_status_tx
                                 .send(StatusUpdate::FileFailed(recv.into_string().unwrap()))
                                 .unwrap_or_else(|e| {
-                                    dbg!(e);
+                                    debug_dbg!(e);
                                     logging_open = false;
                                 })
                         }
@@ -575,7 +597,7 @@ pub fn attempt_update_backup(
                         .send(StatusUpdate::FileUnchanged())
                         .unwrap_or_else(|e| {
                             logging_open = false;
-                            dbg!(e);
+                            debug_dbg!(e);
                         });
                 }
             }
@@ -588,7 +610,7 @@ pub fn attempt_update_backup(
         update_status(&child_backup_data, status_rx, program_start_time, logging)
     });
 
-    backup_folder(
+    let (_, total_files) = backup_folder(
         &backup_data,
         PathBuf::new(),
         &backup_tx,
@@ -598,9 +620,9 @@ pub fn attempt_update_backup(
     );
 
     status_tx
-        .send(StatusUpdate::ScanFinished())
+        .send(StatusUpdate::ScanFinished(total_files))
         .unwrap_or_else(|e| {
-            dbg!(e);
+            debug_dbg!(e);
         });
 
     drop(backup_tx);
