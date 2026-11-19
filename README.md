@@ -13,7 +13,9 @@ Assumptions and features:
 
 # How to use
 After building for release, call execute the binary with the following command to start the process
+```sh
 ./target/release/backup PATH_TO_DESTINATION \[PATH_TO_ORIGIN\] \[-s\]
+```
 
 If this is the first time running the script, the destination folder cannot already exist, and the origin must be specified. After this, only the destination path must be specified.
 If -s is specified, the program runs silently.
